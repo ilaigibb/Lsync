@@ -1,0 +1,15 @@
+# lsync
+
+# User configuration (do not commit)
+~/.lsyncrc
+
+# Backup directories
+*_backup_*
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
