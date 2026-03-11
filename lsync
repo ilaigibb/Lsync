@@ -2,7 +2,14 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.0"
+
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$SCRIPT_PATH" != "/usr/local/bin" ]]; then
+    CLONE_MARKER="[CLONE]"
+else
+    CLONE_MARKER=""
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,7 +41,12 @@ DEBUG=false
 DRY_RUN=false
 DELETE_FLAG=false
 
-CONFIG_FILE="$HOME/.lsyncrc"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lsync"
+CONFIG_FILE="$CONFIG_DIR/config"
+PROFILES_DIR="$CONFIG_DIR/profiles"
+DEFAULT_PROFILE=""
+
+mkdir -p "$CONFIG_DIR" "$PROFILES_DIR"
 
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -43,7 +55,7 @@ load_config() {
 }
 
 init_config() {
-    echo -e "${CYAN}=== First Time Setup ===${NC}"
+    echo -e "${CYAN}${CLONE_MARKER}=== First Time Setup ===${NC}"
     echo ""
     
     echo -n "Enter SSH Host [$DEFAULT_HOST]: "
@@ -95,13 +107,13 @@ PULL_CMD="$PULL_CMD"
 EOF
 
     echo ""
-    echo -e "${GREEN}Config saved to $CONFIG_FILE${NC}"
+    echo -e "${GREEN}${CLONE_MARKER}Config saved to $CONFIG_FILE${NC}"
     echo ""
     echo "You can edit this file anytime or run 'lsync init --reset' to reconfigure."
 }
 
 show_help() {
-    echo "lsync v$VERSION - File synchronization tool"
+    echo "lsync v$VERSION${CLONE_MARKER:+ $CLONE_MARKER} - File synchronization tool"
     echo ""
     echo "Usage: lsync [options] <command> [folder]"
     echo ""
@@ -117,13 +129,26 @@ show_help() {
     echo "  $PULL_CMD          Pull $REMOTE_PATH from server"
     echo "  push [folder]      Push current directory to server"
     echo "  pull [folder]      Pull current directory from server"
+    echo ""
+    echo "Profile Commands:"
+    echo "  create <name>       Create new profile"
+    echo "  add <profile> <path-name> [folder]  Add path to profile"
+    echo "  remove <profile> [path-name]       Remove profile or path"
+    echo "  profiles           List all profiles"
+    echo "  default <profile>  Set default profile"
+    echo "  rename <old> <new>  Rename profile"
+    echo "  <profile>           Pull from profile (shorthand)"
+    echo "  push <profile>      Push to profile"
+    echo "  pull <profile>      Pull from profile"
+    echo ""
+    echo "Other Commands:"
     echo "  backup             List available backups"
     echo "  restore <name>     Restore from backup"
     echo "  init               Configure lsync"
     echo "  init --reset       Reset configuration"
     echo "  --version          Show version"
     echo ""
-    echo "Config file: $CONFIG_FILE"
+    echo "Config: $CONFIG_DIR/"
 }
 
 parse_flags() {
@@ -139,7 +164,7 @@ parse_flags() {
                 exit 0
                 ;;
             --version)
-                echo "lsync v$VERSION"
+                echo "lsync v$VERSION${CLONE_MARKER:+ $CLONE_MARKER}"
                 exit 0
                 ;;
             -*)
@@ -265,7 +290,7 @@ backup_create() {
         echo "Creating backup: $backup_path"
     fi
     if ! rsync -avq "$src" "$backup_path/" 2>/dev/null; then
-        echo -e "${RED}Error: Backup failed${NC}" >&2
+        echo -e "${RED}${CLONE_MARKER}Error: Backup failed${NC}" >&2
         return 1
     fi
     if [[ "$QUIET" != "true" ]]; then
@@ -309,6 +334,370 @@ backup_list() {
     ls -lt "$BACKUP_DIR" 2>/dev/null | head -20
 }
 
+profile_create() {
+    local name="$1"
+    
+    if [[ -z "$name" ]]; then
+        echo "Usage: lsync create <name>"
+        return 1
+    fi
+    
+    if [[ -f "$PROFILES_DIR/$name.conf" ]]; then
+        echo -e "${YELLOW}${CLONE_MARKER}Profile '$name' already exists${NC}"
+        return 1
+    fi
+    
+    cat > "$PROFILES_DIR/$name.conf" << EOF
+# lsync profile: $name
+# Add paths using: lsync add $name <path-name> [folder]
+
+EOF
+    
+    echo -e "${GREEN}${CLONE_MARKER}Created profile '$name'${NC}"
+    echo "Add paths with: lsync add $name <path-name> [folder]"
+}
+
+profile_add() {
+    local profile="$1"
+    local path_name="$2"
+    local folder="${3:-}"
+    
+    if [[ -z "$profile" || -z "$path_name" ]]; then
+        echo "Usage: lsync add <profile> <path-name> [folder]"
+        return 1
+    fi
+    
+    local profile_file="$PROFILES_DIR/$profile.conf"
+    
+    if [[ ! -f "$profile_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
+        echo "Create it with: lsync create $profile"
+        return 1
+    fi
+    
+    local cwd
+    local local_path
+    local remote_path
+    
+    if [[ -z "$folder" ]]; then
+        cwd="$(pwd)"
+        local_path="$cwd"
+        remote_path="$cwd"
+    else
+        cwd="$(pwd)"
+        local_path="$cwd/$folder"
+        remote_path="$cwd/$folder"
+    fi
+    
+    echo "" >> "$profile_file"
+    echo "[$path_name]" >> "$profile_file"
+    echo "local=\"$local_path\"" >> "$profile_file"
+    echo "remote=\"$remote_path\"" >> "$profile_file"
+    
+    echo -e "${GREEN}${CLONE_MARKER}Added '$path_name' to profile '$profile'${NC}"
+    echo "  local: $local_path"
+    echo "  remote: $remote_path"
+}
+
+profile_remove() {
+    local profile="$1"
+    local path_name="$2"
+    
+    local profile_file="$PROFILES_DIR/$profile.conf"
+    
+    if [[ ! -f "$profile_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
+        return 1
+    fi
+    
+    if [[ -z "$path_name" ]]; then
+        if confirm "Delete entire profile '$profile'?"; then
+            rm "$profile_file"
+            if [[ "$DEFAULT_PROFILE" == "$profile" ]]; then
+                sed -i 's/DEFAULT_PROFILE=.*/DEFAULT_PROFILE=""/' "$CONFIG_FILE" 2>/dev/null || true
+            fi
+            echo -e "${GREEN}${CLONE_MARKER}Deleted profile '$profile'${NC}"
+        else
+            echo "Cancelled."
+        fi
+        return
+    fi
+    
+    local tmp_file
+    tmp_file=$(mktemp)
+    
+    local in_section=false
+    while IFS= read -r line; do
+        if [[ "$line" == "[$path_name]" ]]; then
+            in_section=true
+            continue
+        fi
+        if [[ "$in_section" == true && "$line" == \[\]*"]" ]]; then
+            in_section=false
+        fi
+        if [[ "$in_section" == false ]]; then
+            echo "$line"
+        fi
+    done < "$profile_file" > "$tmp_file"
+    
+    mv "$tmp_file" "$profile_file"
+    echo -e "${GREEN}${CLONE_MARKER}Removed '$path_name' from profile '$profile'${NC}"
+}
+
+profile_list() {
+    echo "Profiles:"
+    if [[ -z "$(ls -A "$PROFILES_DIR" 2>/dev/null)" ]]; then
+        echo "  No profiles yet. Create one with: lsync create <name>"
+        return
+    fi
+    
+    for profile_file in "$PROFILES_DIR"/*.conf; do
+        [[ -f "$profile_file" ]] || continue
+        local name
+        name=$(basename "$profile_file" .conf)
+        
+        if [[ "$name" == "$DEFAULT_PROFILE" ]]; then
+            echo -e "  ${GREEN}$name${NC} (default)"
+        else
+            echo "  $name"
+        fi
+        
+        source "$profile_file" 2>/dev/null || continue
+        
+        local paths=()
+        while IFS= read -r line; do
+            if [[ "$line" == \[*] ]]; then
+                local p="${line#[}"
+                p="${p%]}"
+                paths+=("$p")
+            fi
+        done < "$profile_file"
+        
+        for p in "${paths[@]}"; do
+            echo "    - $p"
+        done
+    done
+}
+
+profile_set_default() {
+    local profile="$1"
+    
+    if [[ -z "$profile" ]]; then
+        if [[ -n "$DEFAULT_PROFILE" ]]; then
+            echo "Current default: $DEFAULT_PROFILE"
+        else
+            echo "No default profile set."
+        fi
+        echo "Usage: lsync default <profile>"
+        return
+    fi
+    
+    local profile_file="$PROFILES_DIR/$profile.conf"
+    
+    if [[ ! -f "$profile_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
+        return 1
+    fi
+    
+    if grep -q "^DEFAULT_PROFILE=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$profile\"/" "$CONFIG_FILE"
+    else
+        echo "DEFAULT_PROFILE=\"$profile\"" >> "$CONFIG_FILE"
+    fi
+    
+    DEFAULT_PROFILE="$profile"
+    echo -e "${GREEN}${CLONE_MARKER}Default profile set to '$profile'${NC}"
+}
+
+profile_rename() {
+    local old_name="$1"
+    local new_name="$2"
+    
+    if [[ -z "$old_name" || -z "$new_name" ]]; then
+        echo "Usage: lsync rename <old-name> <new-name>"
+        return 1
+    fi
+    
+    local old_file="$PROFILES_DIR/$old_name.conf"
+    local new_file="$PROFILES_DIR/$new_name.conf"
+    
+    if [[ ! -f "$old_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$old_name' does not exist${NC}"
+        return 1
+    fi
+    
+    if [[ -f "$new_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$new_name' already exists${NC}"
+        return 1
+    fi
+    
+    mv "$old_file" "$new_file"
+    
+    if [[ "$DEFAULT_PROFILE" == "$old_name" ]]; then
+        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$new_name\"/" "$CONFIG_FILE"
+    fi
+    
+    echo -e "${GREEN}${CLONE_MARKER}Renamed profile '$old_name' to '$new_name'${NC}"
+}
+
+load_profile() {
+    local profile="$1"
+    local profile_file="$PROFILES_DIR/$profile.conf"
+    
+    if [[ ! -f "$profile_file" ]]; then
+        echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
+        return 1
+    fi
+    
+    source "$profile_file"
+    
+    return 0
+}
+
+get_profile_paths() {
+    local profile="$1"
+    local profile_file="$PROFILES_DIR/$profile.conf"
+    
+    if [[ ! -f "$profile_file" ]]; then
+        return 1
+    fi
+    
+    grep -oP '^\[\K[^\]]+' "$profile_file" 2>/dev/null
+}
+
+profile_sync() {
+    local action="$1"
+    local profile="$2"
+    local path_name="$3"
+    
+    if [[ -z "$profile" ]]; then
+        if [[ -n "$DEFAULT_PROFILE" ]]; then
+            profile="$DEFAULT_PROFILE"
+        else
+            echo -e "${RED}${CLONE_MARKER}No profile specified and no default set${NC}"
+            echo "Usage: lsync pull/push <profile> [path-name]"
+            echo "Or set a default: lsync default <profile>"
+            return 1
+        fi
+    fi
+    
+    load_profile "$profile" || return 1
+    
+    if [[ -n "$path_name" ]]; then
+        local local_val remote_val
+        local_val=$(grep -A2 "^\[$path_name\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^local=" | cut -d'"' -f2)
+        remote_val=$(grep -A2 "^\[$path_name\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^remote=" | cut -d'"' -f2)
+        
+        if [[ -z "$local_val" || -z "$remote_val" ]]; then
+            echo -e "${RED}${CLONE_MARKER}Path '$path_name' not found in profile '$profile'${NC}"
+            return 1
+        fi
+        
+        local local_dir="$local_val"
+        local remote_dir="$remote_val"
+        
+        if [[ "$QUIET" != "true" ]]; then
+            echo -e "${CYAN}${CLONE_MARKER}[$profile/$path_name] Checking...${NC}"
+        fi
+        
+        if [[ "$action" == "push" ]]; then
+            if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
+                if [[ "$QUIET" != "true" ]]; then
+                    echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
+                fi
+                return
+            fi
+            
+            get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+            
+            if confirm "Push $path_name to server?"; then
+                backup_create "$USER@$HOST:$remote_dir/" "$profile_$path_name"
+                run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
+            else
+                echo "Push cancelled."
+            fi
+        else
+            if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
+                if [[ "$QUIET" != "true" ]]; then
+                    echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
+                fi
+                return
+            fi
+            
+            get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+            
+            if confirm "Pull $path_name from server?"; then
+                backup_create "$local_dir/" "$profile_$path_name"
+                run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
+            else
+                echo "Pull cancelled."
+            fi
+        fi
+        return
+    fi
+    
+    local paths
+    mapfile -t paths < <(get_profile_paths "$profile")
+    
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}${CLONE_MARKER}No paths in profile '$profile'${NC}"
+        echo "Add paths with: lsync add $profile <path-name> [folder]"
+        return
+    fi
+    
+    for p in "${paths[@]}"; do
+        local local_val remote_val
+        local_val=$(grep -A2 "^\[$p\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^local=" | cut -d'"' -f2)
+        remote_val=$(grep -A2 "^\[$p\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^remote=" | cut -d'"' -f2)
+        
+        if [[ -z "$local_val" || -z "$remote_val" ]]; then
+            continue
+        fi
+        
+        local local_dir="$local_val"
+        local remote_dir="$remote_val"
+        
+        if [[ "$QUIET" != "true" ]]; then
+            echo ""
+            echo -e "${CYAN}${CLONE_MARKER}[$profile/$p] Checking...${NC}"
+        fi
+        
+        if [[ "$action" == "push" ]]; then
+            if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
+                if [[ "$QUIET" != "true" ]]; then
+                    echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
+                fi
+                continue
+            fi
+            
+            get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+            
+            if confirm "Push $p to server?"; then
+                backup_create "$USER@$HOST:$remote_dir/" "$profile_$p"
+                run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
+            else
+                echo "Push cancelled."
+            fi
+        else
+            if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
+                if [[ "$QUIET" != "true" ]]; then
+                    echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
+                fi
+                continue
+            fi
+            
+            get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+            
+            if confirm "Pull $p from server?"; then
+                backup_create "$local_dir/" "$profile_$p"
+                run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
+            else
+                echo "Pull cancelled."
+            fi
+        fi
+    done
+}
+
 run_rsync_progress() {
     local src="$1"
     local dst="$2"
@@ -319,14 +708,14 @@ run_rsync_progress() {
     
     if [[ $total_files -eq 0 ]]; then
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${CYAN}Syncing...${NC}"
+            echo -e "${CYAN}${CLONE_MARKER}Syncing...${NC}"
         fi
         if ! rsync -avz -q -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src" "$dst" 2>&1; then
-            echo -e "${RED}Error: Sync failed${NC}" >&2
+            echo -e "${RED}${CLONE_MARKER}Error: Sync failed${NC}" >&2
             return 1
         fi
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${GREEN}Done!${NC}"
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
         fi
         return
     fi
@@ -362,12 +751,12 @@ run_rsync_progress() {
     echo ""
     
     if [[ $rsync_exit_code -ne 0 ]]; then
-        echo -e "${RED}Error: Sync failed with exit code $rsync_exit_code${NC}" >&2
+        echo -e "${RED}${CLONE_MARKER}Error: Sync failed with exit code $rsync_exit_code${NC}" >&2
         return 1
     fi
     
     if [[ "$QUIET" != "true" ]]; then
-        echo -e "${GREEN}Done!${NC}"
+        echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
     fi
 }
 
@@ -389,12 +778,12 @@ sync_push() {
     fi
     
     if [[ "$QUIET" != "true" ]]; then
-        echo -e "${CYAN}Checking...${NC}"
+        echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
     
     if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${GREEN}Nothing to commit${NC}"
+            echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
         fi
         return
     fi
@@ -409,7 +798,7 @@ sync_push() {
         
         run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${GREEN}Done!${NC}"
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
         fi
     else
         echo "Push cancelled."
@@ -434,12 +823,12 @@ sync_pull() {
     fi
     
     if [[ "$QUIET" != "true" ]]; then
-        echo -e "${CYAN}Checking...${NC}"
+        echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
     
     if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${GREEN}Nothing to commit${NC}"
+            echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
         fi
         return
     fi
@@ -454,7 +843,7 @@ sync_pull() {
         
         run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
         if [[ "$QUIET" != "true" ]]; then
-            echo -e "${GREEN}Done!${NC}"
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
         fi
     else
         echo "Pull cancelled."
@@ -467,13 +856,13 @@ sync_default() {
     local remote_dir="$REMOTE_PATH"
     
     if [[ "$QUIET" != "true" ]]; then
-        echo -e "${CYAN}Checking...${NC}"
+        echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
     
     if [[ "$action" == "push" ]]; then
         if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
             if [[ "$QUIET" != "true" ]]; then
-                echo -e "${GREEN}Nothing to commit${NC}"
+                echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
             fi
             return
         fi
@@ -488,7 +877,7 @@ sync_default() {
             
             run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
             if [[ "$QUIET" != "true" ]]; then
-                echo -e "${GREEN}Done!${NC}"
+                echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
             fi
         else
             echo "Push cancelled."
@@ -496,7 +885,7 @@ sync_default() {
     else
         if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
             if [[ "$QUIET" != "true" ]]; then
-                echo -e "${GREEN}Nothing to commit${NC}"
+                echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
             fi
             return
         fi
@@ -511,7 +900,7 @@ sync_default() {
             
             run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
             if [[ "$QUIET" != "true" ]]; then
-                echo -e "${GREEN}Done!${NC}"
+                echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
             fi
         else
             echo "Pull cancelled."
@@ -525,7 +914,7 @@ main() {
     if [[ "$CMD_ACTION" == "init" ]]; then
         if [[ "$CMD_ARG" == "--reset" || -f "$CONFIG_FILE" ]]; then
             if [[ -f "$CONFIG_FILE" && "$CMD_ARG" != "--reset" ]]; then
-                echo -e "${YELLOW}Config already exists at $CONFIG_FILE${NC}"
+                echo -e "${YELLOW}${CLONE_MARKER}Config already exists at $CONFIG_FILE${NC}"
                 echo -n "Overwrite? [y/N]: "
                 read -r confirm
                 if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -564,11 +953,37 @@ main() {
         restore)
             backup_restore "${CMD_ARG:-}"
             ;;
+        create)
+            profile_create "${CMD_ARG:-}"
+            ;;
+        add)
+            profile_add "${2:-}" "${3:-}" "${4:-}"
+            ;;
+        remove|rm)
+            profile_remove "${2:-}" "${3:-}"
+            ;;
+        profiles|ls)
+            profile_list
+            ;;
+        default)
+            profile_set_default "${2:-}"
+            ;;
+        rename)
+            profile_rename "${2:-}" "${3:-}"
+            ;;
         *)
-            echo -e "${RED}Unknown command: $CMD_ACTION${NC}"
-            echo ""
-            show_help
-            exit 1
+            if [[ -f "$PROFILES_DIR/${CMD_ACTION}.conf" ]]; then
+                profile_sync "pull" "$CMD_ACTION" "${CMD_ARG:-}"
+            elif [[ "$CMD_ACTION" == "push" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
+                profile_sync "push" "$CMD_ARG" "${3:-}"
+            elif [[ "$CMD_ACTION" == "pull" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
+                profile_sync "pull" "$CMD_ARG" "${3:-}"
+            else
+                echo -e "${RED}${CLONE_MARKER}Unknown command: $CMD_ACTION${NC}"
+                echo ""
+                show_help
+                exit 1
+            fi
             ;;
     esac
 }

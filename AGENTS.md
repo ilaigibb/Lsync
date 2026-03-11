@@ -1,40 +1,37 @@
 # AGENTS.md - lsync Project Documentation
 
-## Current Status
-
-**NOT YET PUBLISHED** - Files exist locally, need to push to GitHub first.
-
----
-
 ## Project Overview
 
 **lsync** is a bash-based file and directory synchronization tool that uses rsync over SSH to sync files between a local machine and remote server.
 
+**Naming Note**: Previously synced `.lodestone`, now syncs `.pterodactyl` (petro) - the user switched from lodestone to pterodactyl panel.
+
 ---
 
-## Installation (After GitHub Push)
+## Local Development Setup
+
+The repo is cloned at `/home/ilai/Lsync`. Use the local version via:
 
 ```bash
-# Quick install
-curl -sL https://raw.githubusercontent.com/ilaigibb/Lsync/main/install.sh | bash
+# Add to PATH (already added to ~/.bashrc)
+export PATH="$HOME/bin:$PATH"
 
-# Or manual install
-curl -sL https://raw.githubusercontent.com/ilaigibb/Lsync/main/lsync -o /usr/local/bin/lsync
-chmod +x /usr/local/bin/lsync
-lsync init
+# Or run directly
+/home/ilai/Lsync/lsync --help
+
+# Or via symlink in ~/bin
+~/bin/lsync --help
 ```
 
 ---
 
-## Local Installation (Before GitHub)
+## Installation
 
 ```bash
-# Copy to /usr/local/bin (requires sudo)
-sudo cp /home/ilai/bin/lsync /usr/local/bin/lsync
+# Quick install (requires sudo)
+sudo cp /home/ilai/Lsync/lsync /usr/local/bin/lsync
 sudo chmod +x /usr/local/bin/lsync
-
-# Or use local version directly
-/home/ilai/bin/lsync --help
+lsync init
 ```
 
 ---
@@ -47,7 +44,7 @@ First run `lsync init` to configure. Config is stored at `~/.lsyncrc`:
 HOST="129.159.130.127"
 USER="ubuntu"
 SSH_KEY="$HOME/.ssh/id_rsa.key"
-REMOTE_PATH=".lodestone"
+REMOTE_PATH=".pterodactyl"
 LOCAL_PATH="$HOME/localServer"
 BACKUP_DIR="$HOME/.lsync_backups"
 PUSH_CMD="dpush"
@@ -60,8 +57,8 @@ PULL_CMD="dpull"
 
 | Command | Description |
 |---------|-------------|
-| `lsync dpush` | Push `.lodestone` to server |
-| `lsync dpull` | Pull `.lodestone` from server |
+| `lsync dpush` | Push `.pterodactyl` to server |
+| `lsync dpull` | Pull `.pterodactyl` from server |
 | `lsync push [folder]` | Push current directory to server |
 | `lsync pull [folder]` | Pull current directory from server |
 | `lsync backup` | List available backups |
@@ -83,45 +80,16 @@ PULL_CMD="dpull"
 
 ---
 
-## Files in Repo
-
-```
-/home/ilai/bin/
-├── lsync           - Main script
-├── install.sh      - One-line installer
-├── README.md       - User docs
-├── AGENTS.md       - Dev docs
-├── .gitignore      - Git ignore
-└── LICENSE         - MIT License
-```
-
----
-
-## GitHub Push Steps
-
-1. Create repo at https://github.com/new (name: `Lsync`)
-2. Run:
-   ```bash
-   cd /home/ilai/bin
-   git init
-   git add .
-   git commit -m "v1.0.0"
-   git remote add origin https://github.com/ilaigibb/Lsync.git
-   git push -u origin main
-   ```
-
----
-
 ## Testing
 
 ```bash
 # Test locally
-/home/ilai/bin/lsync --version
-/home/ilai/bin/lsync --help
+/home/ilai/Lsync/lsync --version
+/home/ilai/Lsync/lsync --help
 
 # Auto-confirm
-echo "y" | /home/ilai/bin/lsync dpull
+echo "y" | /home/ilai/Lsync/lsync dpull
 
 # With timeout
-timeout 30 /home/ilai/bin/lsync dpull
+timeout 30 /home/ilai/Lsync/lsync dpull
 ```
