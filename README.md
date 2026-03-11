@@ -27,16 +27,6 @@ lsync init
 
 Run `lsync init` to configure. Config saved to `~/.lsyncrc`:
 
-```bash
-HOST="129.159.130.127"
-USER="ubuntu"
-SSH_KEY="$HOME/.ssh/id_rsa.key"
-REMOTE_PATH=".lodestone"
-LOCAL_PATH="$HOME/localServer"
-BACKUP_DIR="$HOME/.lsync_backups"
-PUSH_CMD="dpush"
-PULL_CMD="dpull"
-```
 
 ## Commands
 
