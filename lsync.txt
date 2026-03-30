@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.1.1"
+VERSION="1.1.0"
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$SCRIPT_PATH" != "/usr/local/bin" ]]; then
@@ -31,89 +31,49 @@ get_rsync_path() {
     fi
 }
 
-get_ssh_opts() {
-    # BUG 18 FIX: Accept "false", "0", or "no" — previously only the exact string
-    # "false" was recognised; values like "0" or "no" were silently ignored.
-    if [[ "$STRICT_HOST_KEY_CHECKING" == "false" || \
-          "$STRICT_HOST_KEY_CHECKING" == "0"     || \
-          "$STRICT_HOST_KEY_CHECKING" == "no"    ]]; then
-        echo "-o StrictHostKeyChecking=no"
-    else
-        echo "-o StrictHostKeyChecking=accept-new"
-    fi
-}
-
 get_remote_user() {
     if [[ -n "$REMOTE_USER" ]]; then
         echo "$REMOTE_USER"
+    elif should_use_sudo; then
+        echo "root"
     else
-        echo "$SSH_USER"
+        echo "$USER"
     fi
 }
 
-# BUG 3 FIX: This function previously always returned 0, making it a no-op and
-# rendering all "|| { echo "Push cancelled."; return 1; }" guards unreachable.
-# It now actually prompts the user when sudo hasn't been pre-authorised.
 prompt_sudo_if_needed() {
     if should_use_sudo; then
         return 0
     fi
-    if [[ "$AUTO_YES" == true ]]; then
+    
+    if [[ "$AUTO_SUDO" == true ]]; then
         USE_SUDO=true
         return 0
     fi
-    local r
-    echo -n "This operation may require sudo on the remote host. Continue? [y/n] "
-    read -r r || { echo; return 1; }
-    if [[ "$r" == "y" || "$r" == "Y" ]]; then
-        return 0
-    fi
-    return 1
+    
+    return 0
 }
-
-FILTER_ARGS=()
-NEWER_REF_FILE=""
-
-_cleanup() {
-    [[ -n "$NEWER_REF_FILE" ]] && rm -f "$NEWER_REF_FILE"
-}
-trap _cleanup EXIT
 
 build_rsync_filters() {
-    FILTER_ARGS=()
+    local filters=""
+    
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        FILTER_ARGS+=("--exclude=$pattern")
+        filters="$filters --exclude=$pattern"
     done
+    
     if [[ -n "$MIN_SIZE" ]]; then
-        FILTER_ARGS+=("--min-size=$MIN_SIZE")
+        filters="$filters --min-size=$MIN_SIZE"
     fi
+    
     if [[ -n "$NEWER_THAN" ]]; then
-        # rsync --newer=FILE takes a *file path* as a timestamp reference, not a
-        # duration string.  Create a temp file with the right mtime and clean it
-        # up via the _cleanup EXIT trap.
-        # Accepted: Ns/Nm/Nh/Nd (seconds/minutes/hours/days), or any string
-        # accepted by touch -d (e.g. "2024-01-01", "yesterday").
-        NEWER_REF_FILE=$(mktemp /tmp/.lsync_newer_XXXXXX)
-        if [[ "$NEWER_THAN" =~ ^([0-9]+)([smhd])$ ]]; then
-            local amount="${BASH_REMATCH[1]}"
-            local unit="${BASH_REMATCH[2]}"
-            local touch_arg
-            case "$unit" in
-                s) touch_arg="-${amount} seconds" ;;
-                m) touch_arg="-${amount} minutes" ;;
-                h) touch_arg="-${amount} hours"   ;;
-                d) touch_arg="-${amount} days"    ;;
-            esac
-            touch -d "$touch_arg" "$NEWER_REF_FILE"
-        else
-            touch -d "$NEWER_THAN" "$NEWER_REF_FILE" 2>/dev/null \
-                || touch "$NEWER_REF_FILE"
-        fi
-        FILTER_ARGS+=("--newer=$NEWER_REF_FILE")
+        filters="$filters --newer-than=$NEWER_THAN"
     fi
+    
     if [[ "$USE_CHECKSUM" == true ]]; then
-        FILTER_ARGS+=("--checksum")
+        filters="$filters --checksum"
     fi
+    
+    echo "$filters"
 }
 
 is_color_enabled() {
@@ -126,43 +86,35 @@ is_color_enabled() {
     return 0
 }
 
-verbose() {
-    if [[ $VERBOSE -gt 0 ]]; then
-        echo -e "${CYAN}[VERBOSE]${NC} $*"
-    fi
-}
-
 validate_config() {
     local has_warnings=0
-
+    
     if [[ -z "$HOST" ]]; then
         echo -e "${RED}Error: HOST is not configured${NC}" >&2
         has_warnings=1
     fi
-
-    # BUG 13 FIX: Check $SSH_USER, not $USER. $USER is bash's built-in and is
-    # always set (to the system login name), so the old check never triggered.
-    if [[ -z "$SSH_USER" ]]; then
-        echo -e "${RED}Error: SSH_USER is not configured${NC}" >&2
+    
+    if [[ -z "$USER" ]]; then
+        echo -e "${RED}Error: USER is not configured${NC}" >&2
         has_warnings=1
     fi
-
+    
     if [[ -n "$SSH_KEY" && ! -f "$SSH_KEY" ]]; then
         echo -e "${YELLOW}Warning: SSH key not found: $SSH_KEY${NC}" >&2
         has_warnings=1
     fi
-
+    
     if [[ "$AUTO_SUDO" == true ]]; then
         echo -e "${YELLOW}Warning: AUTO_SUDO is enabled. Will auto-use sudo without prompting.${NC}" >&2
     fi
-
+    
     if [[ $has_warnings -eq 1 ]]; then
         return 1
     fi
     return 0
 }
 
-DEFAULT_HOST=""
+DEFAULT_HOST="129.159.130.127"
 DEFAULT_USER="ubuntu"
 DEFAULT_SSH_KEY="$HOME/.ssh/id_rsa.key"
 DEFAULT_REMOTE_PATH=".lodestone"
@@ -172,10 +124,7 @@ DEFAULT_PUSH_CMD="dpush"
 DEFAULT_PULL_CMD="dpull"
 
 HOST="$DEFAULT_HOST"
-# BUG 13 FIX: Renamed USER -> SSH_USER throughout to stop shadowing bash's built-in
-# $USER environment variable (the system login name). Existing config files that
-# still contain USER= are handled transparently in load_config() below.
-SSH_USER="$DEFAULT_USER"
+USER="$DEFAULT_USER"
 SSH_KEY="$DEFAULT_SSH_KEY"
 REMOTE_PATH="$DEFAULT_REMOTE_PATH"
 LOCAL_PATH="$DEFAULT_LOCAL_PATH"
@@ -199,7 +148,6 @@ BACKUP_DAYS=30
 COLOR_OUTPUT=true
 VERBOSE=0
 USE_CHECKSUM=false
-STRICT_HOST_KEY_CHECKING=true
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lsync"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -211,78 +159,66 @@ mkdir -p "$CONFIG_DIR" "$PROFILES_DIR"
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        # BUG 13 FIX: Backward-compat migration for configs that still use USER=.
-        # After sourcing, if SSH_USER wasn't set but the old USER= key was present,
-        # adopt it.  We check the file directly so we don't misread the system $USER.
-        if [[ -z "${SSH_USER:-}" ]]; then
-            local _legacy_user
-            _legacy_user=$(grep -m1 "^USER=" "$CONFIG_FILE" 2>/dev/null \
-                           | sed 's/^USER=//; s/^"//; s/"$//')
-            [[ -n "$_legacy_user" ]] && SSH_USER="$_legacy_user"
-        fi
-        SSH_USER="${SSH_USER:-$DEFAULT_USER}"
     fi
-    REMOTE_USER="${REMOTE_USER:-${DEFAULT_REMOTE_USER:-$SSH_USER}}"
+    REMOTE_USER="${DEFAULT_REMOTE_USER:-$USER}"
 }
 
 init_config() {
     echo -e "${CYAN}${CLONE_MARKER}=== First Time Setup ===${NC}"
     echo ""
-
+    
     echo -n "Enter SSH Host [$DEFAULT_HOST]: "
-    read -r host_input || true
+    read -r host_input
     HOST="${host_input:-$DEFAULT_HOST}"
-
+    
     echo -n "Enter SSH User [$DEFAULT_USER]: "
-    read -r user_input || true
-    SSH_USER="${user_input:-$DEFAULT_USER}"
-
+    read -r user_input
+    USER="${user_input:-$DEFAULT_USER}"
+    
     echo -n "SSH Key Path [$DEFAULT_SSH_KEY]: "
-    read -r key_input || true
+    read -r key_input
     SSH_KEY="${key_input:-$DEFAULT_SSH_KEY}"
-
+    
     echo -n "Local Path [$DEFAULT_LOCAL_PATH]: "
-    read -r local_input || true
+    read -r local_input
     LOCAL_PATH="${local_input:-$DEFAULT_LOCAL_PATH}"
-
+    
     echo -n "Remote Path [$DEFAULT_REMOTE_PATH]: "
-    read -r remote_input || true
+    read -r remote_input
     REMOTE_PATH="${remote_input:-$DEFAULT_REMOTE_PATH}"
-
+    
     echo -n "Backup Directory [$DEFAULT_BACKUP_DIR]: "
-    read -r backup_input || true
+    read -r backup_input
     BACKUP_DIR="${backup_input:-$DEFAULT_BACKUP_DIR}"
-
+    
     echo -n "Push Command Name [$DEFAULT_PUSH_CMD]: "
-    read -r push_input || true
+    read -r push_input
     PUSH_CMD="${push_input:-$DEFAULT_PUSH_CMD}"
-
+    
     echo -n "Pull Command Name [$DEFAULT_PULL_CMD]: "
-    read -r pull_input || true
+    read -r pull_input
     PULL_CMD="${pull_input:-$DEFAULT_PULL_CMD}"
-
+    
     echo -n "Auto-sudo for remote commands? (y/n) [n]: "
-    read -r sudo_input || true
+    read -r sudo_input
     [[ "$sudo_input" == "y" ]] && AUTO_SUDO=true || AUTO_SUDO=false
-
+    
     echo -n "Default remote user (leave empty for current) []: "
-    read -r remote_user_input || true
-    DEFAULT_REMOTE_USER="${remote_user_input:-}"
-
+    read -r user_input
+    DEFAULT_REMOTE_USER="${user_input:-}"
+    
     echo -n "Backup rotation (days, 0 to disable) [30]: "
-    read -r backup_days_input || true
+    read -r backup_days_input
     BACKUP_DAYS="${backup_days_input:-30}"
-
+    
     mkdir -p "$(dirname "$CONFIG_FILE")"
-
-    # BUG 13 FIX: Config file now writes SSH_USER= (not USER=) so future loads
-    # don't shadow the bash built-in.
+    
     cat > "$CONFIG_FILE" << EOF
 # lsync configuration
 # Generated by lsync init
 
 HOST="$HOST"
-SSH_USER="$SSH_USER"
+USER="$USER"
 SSH_KEY="$SSH_KEY"
 REMOTE_PATH="$REMOTE_PATH"
 LOCAL_PATH="$LOCAL_PATH"
@@ -315,9 +251,9 @@ show_help() {
     echo "  --delete       Remove files not in source"
     echo "  --exclude      Exclude files matching pattern (can use multiple)"
     echo "  --min-size     Only sync files larger than size (e.g., 1M, 1G)"
-    echo "  --newer        Only sync files newer than duration (e.g., 24h, 7d, 30m) or date (e.g., 2024-01-01)"
+    echo "  --newer-than   Only sync files newer than time (e.g., 24h, 7d)"
     echo "  --no-colors    Disable colored output"
-    echo "  -v, --verbose  Increase verbosity (use multiple times for more detail)"
+    echo "  -v, --verbose Increase verbosity (use multiple times for more detail)"
     echo "  --checksum     Verify file integrity with checksum"
     echo ""
     echo "Commands:"
@@ -327,7 +263,7 @@ show_help() {
     echo "  pull [folder]      Pull current directory from server"
     echo ""
     echo "Profile Commands:"
-    echo "  create <n>       Create new profile"
+    echo "  create <name>       Create new profile"
     echo "  add <profile> <path-name> [folder]  Add path to profile"
     echo "  remove <profile> [path-name]       Remove profile or path"
     echo "  profiles           List all profiles"
@@ -339,7 +275,7 @@ show_help() {
     echo ""
     echo "Other Commands:"
     echo "  backup             List available backups"
-    echo "  restore <n>     Restore from backup"
+    echo "  restore <name>     Restore from backup"
     echo "  init               Configure lsync"
     echo "  init --reset       Reset configuration"
     echo "  --version          Show version"
@@ -348,23 +284,18 @@ show_help() {
 }
 
 parse_flags() {
-    local remaining=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -q|--quiet) QUIET=true; shift ;;
             -y|--yes) AUTO_YES=true; shift ;;
-            --sudo)
-                USE_SUDO=true
-                echo -e "${YELLOW}Warning: --sudo enabled. Ensure passwordless sudo is configured on remote server.${NC}" >&2
-                shift
-                ;;
+            --sudo) USE_SUDO=true; shift ;;
             -u|--user) REMOTE_USER="$2"; shift 2 ;;
             --debug) DEBUG=true; shift ;;
             --dry-run) DRY_RUN=true; shift ;;
             --delete) DELETE_FLAG=true; shift ;;
             --exclude) EXCLUDE_PATTERNS+=("$2"); shift 2 ;;
             --min-size) MIN_SIZE="$2"; shift 2 ;;
-            --newer) NEWER_THAN="$2"; shift 2 ;;
+            --newer-than) NEWER_THAN="$2"; shift 2 ;;
             --no-colors) COLOR_OUTPUT=false; shift ;;
             -v|--verbose) VERBOSE=$((VERBOSE + 1)); shift ;;
             --checksum) USE_CHECKSUM=true; shift ;;
@@ -377,56 +308,34 @@ parse_flags() {
                 exit 0
                 ;;
             -*)
-                echo -e "${YELLOW}Warning: Unknown flag '$1' — ignored.${NC}" >&2
                 shift
                 ;;
             *)
-                remaining+=("$1")
-                shift
+                break
                 ;;
         esac
     done
-
-    CMD_ACTION="${remaining[0]:-}"
-    CMD_ARG="${remaining[1]:-}"
-    CMD_ARG2="${remaining[2]:-}"
-    CMD_ARG3="${remaining[3]:-}"
+    
+    CMD_ACTION="${1:-}"
+    CMD_ARG="${2:-}"
 }
 
-# BUG 11 FIX: RSYNC_OPTS converted from a plain string to an array.
-# A string is subject to word-splitting: any option value containing spaces
-# (e.g. --rsh="ssh -p 22") would be split incorrectly before reaching rsync.
-# BUG 15 FIX: Removed the DRY_RUN block that appended a second -n flag to
-# RSYNC_PREVIEW_OPTS — it already contains -n in its initialiser, making the
-# extra append both redundant and confusing.
-RSYNC_PREVIEW_OPTS=(-avzn --out-format=%i%n)
-RSYNC_OPTS=(-avz)
+RSYNC_PREVIEW_OPTS="-avzn --out-format=%i%n"
+RSYNC_OPTS="-avz --progress"
 
-build_rsync_opts() {
-    RSYNC_OPTS=(-avz)
-    RSYNC_PREVIEW_OPTS=(-avzn --out-format=%i%n)
-    if [[ "$DELETE_FLAG" == true ]]; then
-        RSYNC_OPTS+=(--delete)
-    fi
-    # FIX: honour --dry-run — add rsync's -n flag to the real transfer opts.
-    if [[ "$DRY_RUN" == true ]]; then
-        RSYNC_OPTS+=(-n)
-    fi
-    # FIX: propagate extra verbosity levels to rsync itself.
-    # -avz already contains one -v; each additional -v flag increases rsync's
-    # verbosity further (shows per-file stats, checksums, etc.).
-    if [[ $VERBOSE -gt 1 ]]; then
-        for ((i=1; i<VERBOSE; i++)); do
-            RSYNC_OPTS+=(-v)
-        done
-    fi
-}
+if [[ "$DELETE_FLAG" == true ]]; then
+    RSYNC_OPTS="$RSYNC_OPTS --delete"
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+    RSYNC_PREVIEW_OPTS="$RSYNC_PREVIEW_OPTS -n"
+fi
 
 get_changes() {
     local src="$1"
     local dst="$2"
     local quiet="${3:-false}"
-
+    
     local added=0
     local deleted=0
     local files=()
@@ -435,74 +344,53 @@ get_changes() {
     local remote_user
     remote_user=$(get_remote_user)
     local dst_with_user
-
-    build_rsync_filters
-
+    local filters
+    filters=$(build_rsync_filters)
+    
     if [[ "$dst" == *@*:* ]]; then
         dst_with_user="${dst%%:*}:${dst#*:}"
         dst_with_user="${remote_user}@${dst_with_user#*@}"
     else
         dst_with_user="$dst"
     fi
-
+    
     if [[ "$DEBUG" == true ]]; then
-        # BUG 1 FIX: Removed the spurious extra "/" — callers already pass trailing slash
-        echo "Running: rsync ${RSYNC_PREVIEW_OPTS[*]} ${FILTER_ARGS[*]} --rsync-path=\"$rsync_path\" -e \"ssh -i '$SSH_KEY' $(get_ssh_opts)\" \"$src\" \"$dst_with_user\""
+        echo "Running: rsync $RSYNC_PREVIEW_OPTS $filters --rsync-path=\"$rsync_path\" -e \"ssh -i $SSH_KEY -o StrictHostKeyChecking=no\" \"$src/\" \"$dst_with_user/\""
     fi
-
-    # BUG 1 FIX: Callers always supply a trailing "/" on both src and dst.
-    # The old code appended another "/" here, producing double slashes (e.g. "path//").
-    # BUG 11 FIX: Use array expansion "${RSYNC_PREVIEW_OPTS[@]}" instead of bare string.
-    # BUG 12 FIX: SSH key path is now single-quoted inside the -e string so paths
-    # containing spaces are passed to ssh as a single token.
-    rsync_output=$(rsync "${RSYNC_PREVIEW_OPTS[@]}" "${FILTER_ARGS[@]}" \
-        --rsync-path="$rsync_path" \
-        -e "ssh -i '$SSH_KEY' $(get_ssh_opts)" \
-        "$src" "$dst_with_user" 2>&1)
-
+    
+    rsync_output=$(rsync $RSYNC_PREVIEW_OPTS $filters --rsync-path="$rsync_path" -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src/" "$dst_with_user/" 2>&1)
+    
     if [[ "$DEBUG" == true ]]; then
         echo "--- RSYNC OUTPUT START ---"
         echo "$rsync_output"
         echo "--- RSYNC OUTPUT END ---"
     fi
-
-    rsync_output=$(echo "$rsync_output" \
-        | grep -v '^sending' | grep -v '^receiving' | grep -v '^total:' \
-        | grep -v '^Number of' | grep -v '^--' \
-        | grep -v '^sent ' | grep -v '^total ')
-
+    
+    rsync_output=$(echo "$rsync_output" | grep -v '^sending' | grep -v '^receiving' | grep -v '^total:' | grep -v '^Number of' | grep -v '^--' | grep -v '^sent ' | grep -v '^total ')
+    
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         indicator="${line:0:1}"
-        # rsync --out-format=%i%n itemize codes:
-        #   <  file is being sent to remote (push — added/updated at dst)
-        #   >  file is being received from remote (pull — added/updated at dst)
-        #   c  local change/creation (dir, symlink, device)
-        #   *  special message — only *deleting entries indicate removals
-        [[ "$indicator" != ">" && "$indicator" != "<" && \
-           "$indicator" != "c" && "$indicator" != "*" ]] && continue
+        [[ "$indicator" != ">" && "$indicator" != "<" && "$indicator" != "c" && "$indicator" != "d" ]] && continue
         filename="${line:11}"
-
+        
         [[ -z "$filename" ]] && continue
-
+        
         local is_dir=false
         if [[ "$filename" == */ ]]; then
             is_dir=true
             filename="${filename%/}"
         fi
-
-        if [[ "$indicator" == "*" ]]; then
-            # Only *deleting lines count as removals; ignore other * messages.
-            [[ "${line:1:8}" != "deleting" ]] && continue
-            deleted=$((deleted + 1))
+        
+        if [[ "$indicator" == "<" ]]; then
+            ((deleted++))
             if [[ "$is_dir" == true ]]; then
                 files+=("-${filename}/")
             else
                 files+=("-${filename}")
             fi
-        else
-            # <, >, c — file will be transferred / created at the destination.
-            added=$((added + 1))
+        elif [[ "$indicator" == ">" || "$indicator" == "c" ]]; then
+            ((added++))
             if [[ "$is_dir" == true ]]; then
                 files+=("+${filename}/")
             else
@@ -510,38 +398,35 @@ get_changes() {
             fi
         fi
     done <<< "$rsync_output"
-
+    
     if [[ $added -eq 0 && $deleted -eq 0 ]]; then
         return 1
     fi
-
+    
     if [[ "$quiet" == "true" || "$QUIET" == "true" ]]; then
         return 0
     fi
-
+    
     echo -e "${GREEN}+$added${NC} ${RED}-$deleted${NC}:"
     for f in "${files[@]}"; do
         if [[ "$f" == -* ]]; then
-            printf "${RED}%s${NC}\n" "$f"
+            printf "${RED}$f${NC}\n" "${f:1}"
         else
-            printf "${GREEN}%s${NC}\n" "$f"
+            printf "${GREEN}$f${NC}\n"
         fi
     done
-
+    
     return 0
 }
 
-# BUG 17 FIX: Added -r flag to read. Without it, a backslash typed by the user
-# causes bash to consume the next line as a continuation, and backslash sequences
-# in the prompt string are interpreted.
 confirm() {
     if [[ "$AUTO_YES" == true ]]; then
         return 0
     fi
-
+    
     local prompt="$1"
     while true; do
-        read -r -p "$prompt [y/n] " || { echo; return 1; }
+        read -p "$prompt [y/n] " 
         case "$REPLY" in
             y|Y) return 0 ;;
             n|N) return 1 ;;
@@ -553,43 +438,35 @@ backup_create() {
     local src="$1"
     local name="$2"
     local backup_path="$BACKUP_DIR/${name}_$(date +%Y%m%d_%H%M%S)"
-
+    
     local rsync_path
     rsync_path=$(get_rsync_path)
     local remote_user
     remote_user=$(get_remote_user)
     local src_with_user
-
+    
     if [[ "$src" == *@*:* ]]; then
         src_with_user="${remote_user}@${src#*@}"
     else
         src_with_user="$src"
     fi
-
+    
     mkdir -p "$BACKUP_DIR"
     if [[ "$QUIET" != "true" ]]; then
         echo "Creating backup: $backup_path"
     fi
-
-    local rsync_cmd=("rsync" "-avq")
+    
+    local rsync_cmd
     if [[ "$src" == *@*:* ]]; then
-        rsync_cmd+=(
-            "--rsync-path=$rsync_path"
-            # BUG 6 FIX: Use get_ssh_opts() so STRICT_HOST_KEY_CHECKING is honoured
-            # during backups (previously hardcoded to accept-new, ignoring the config).
-            # BUG 12 FIX: SSH key path single-quoted to survive spaces.
-            "-e" "ssh -i '$SSH_KEY' $(get_ssh_opts)"
-        )
+        rsync_cmd="rsync -avq --rsync-path=\"$rsync_path\" -e \"ssh -i $SSH_KEY -o StrictHostKeyChecking=no\""
+    else
+        rsync_cmd="rsync -avq"
     fi
-
-    local err_file; err_file=$(mktemp)
-    if ! "${rsync_cmd[@]}" "$src_with_user" "$backup_path/" 2>"$err_file"; then
-        cat "$err_file" >&2
-        rm -f "$err_file"
+    
+    if ! eval "$rsync_cmd" "$src_with_user" "$backup_path/" 2>/dev/null; then
         echo -e "${RED}${CLONE_MARKER}Error: Backup failed${NC}" >&2
         return 1
     fi
-    rm -f "$err_file"
     if [[ "$QUIET" != "true" ]]; then
         echo "Backup created: $backup_path"
     fi
@@ -599,78 +476,50 @@ backup_create() {
 backup_restore() {
     local name="$1"
     local backup_path
-
+    
     if [[ -z "$name" ]]; then
-        # BUG 14 FIX: Use literal "lsync" instead of $0. When installed in
-        # /usr/local/bin, $0 expands to the full path, producing ugly output like
-        # "Usage: /usr/local/bin/lsync restore …" while every other usage message
-        # in the script uses the bare command name.
-        echo "Usage: lsync restore <backup_name>"
+        echo "Usage: $0 restore <backup_name>"
         return 1
     fi
-
+    
     if [[ -f "$BACKUP_DIR/$name" ]]; then
         backup_path=$(cat "$BACKUP_DIR/$name")
     else
         backup_path="$BACKUP_DIR/$name"
     fi
-
+    
     if [[ ! -d "$backup_path" ]]; then
         echo "Backup not found: $backup_path"
         return 1
     fi
-
+    
     echo "Backup: $backup_path"
     ls -la "$backup_path"
-
-    if confirm "Restore this backup to current directory?"; then
-        echo "Restoring $backup_path to $(pwd)/"
-        rsync -av "$backup_path/" "./"
-        echo "Restore complete."
+    
+    if confirm "Restore this backup?"; then
+        echo "Restore functionality coming soon"
     else
         echo "Restore cancelled."
     fi
 }
 
-# BUG 16 FIX: The old implementation used "ls -lt $BACKUP_DIR | head -20" which
-# mixed real backup directories with the "latest_*" pointer files written by
-# backup_create, producing a confusing list. Now only directories are shown,
-# sorted newest-first, using find so special characters in names are safe.
 backup_list() {
     echo "Available backups:"
-    if [[ ! -d "$BACKUP_DIR" ]]; then
-        echo "  No backups yet."
-        return
-    fi
-    local found=0
-    while IFS= read -r backup_dir; do
-        echo "  $(basename "$backup_dir")"
-        found=$((found + 1))
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -type d \
-                  -not -path "$BACKUP_DIR" \
-                  -printf "%T@ %p\n" 2>/dev/null \
-             | sort -rn | head -20 | awk '{print $2}')
-    if [[ $found -eq 0 ]]; then
-        echo "  No backups yet."
-    fi
+    ls -lt "$BACKUP_DIR" 2>/dev/null | head -20
 }
 
 backup_rotate() {
     if [[ -z "$BACKUP_DAYS" || "$BACKUP_DAYS" -eq 0 ]]; then
         return 0
     fi
-
+    
     local count=0
-    # BUG 2 FIX: The old pattern was -name "*_"* — the trailing * was outside the
-    # quotes, so bash glob-expanded it against files in the current working directory
-    # before passing anything to find. The whole pattern is now properly quoted.
     while IFS= read -r backup; do
         [[ -z "$backup" ]] && continue
         rm -rf "$backup"
-        count=$((count + 1))
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -type d \
-                  -name "*_*" -mtime +"$BACKUP_DAYS" 2>/dev/null)
-
+        ((count++))
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name "*_"* -mtime +"$BACKUP_DAYS" 2>/dev/null)
+    
     if [[ $count -gt 0 ]]; then
         echo -e "${CYAN}Rotated $count old backup(s)${NC}"
     fi
@@ -678,23 +527,23 @@ backup_rotate() {
 
 profile_create() {
     local name="$1"
-
+    
     if [[ -z "$name" ]]; then
-        echo "Usage: lsync create <n>"
+        echo "Usage: lsync create <name>"
         return 1
     fi
-
+    
     if [[ -f "$PROFILES_DIR/$name.conf" ]]; then
         echo -e "${YELLOW}${CLONE_MARKER}Profile '$name' already exists${NC}"
         return 1
     fi
-
+    
     cat > "$PROFILES_DIR/$name.conf" << EOF
 # lsync profile: $name
 # Add paths using: lsync add $name <path-name> [folder]
 
 EOF
-
+    
     echo -e "${GREEN}${CLONE_MARKER}Created profile '$name'${NC}"
     echo "Add paths with: lsync add $name <path-name> [folder]"
 }
@@ -703,38 +552,39 @@ profile_add() {
     local profile="$1"
     local path_name="$2"
     local folder="${3:-}"
-
+    
     if [[ -z "$profile" || -z "$path_name" ]]; then
         echo "Usage: lsync add <profile> <path-name> [folder]"
         return 1
     fi
-
+    
     local profile_file="$PROFILES_DIR/$profile.conf"
-
+    
     if [[ ! -f "$profile_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
         echo "Create it with: lsync create $profile"
         return 1
     fi
-
+    
+    local cwd
     local local_path
     local remote_path
-
+    
     if [[ -z "$folder" ]]; then
-        local_path="$(pwd)"
+        cwd="$(pwd)"
+        local_path="$cwd"
+        remote_path="$cwd"
     else
-        local_path="$(pwd)/$folder"
+        cwd="$(pwd)"
+        local_path="$cwd/$folder"
+        remote_path="$cwd/$folder"
     fi
-
-    echo -n "Remote path on server (e.g. /var/www/app): "
-    read -r remote_input
-    remote_path="${remote_input:-$local_path}"
-
+    
     echo "" >> "$profile_file"
     echo "[$path_name]" >> "$profile_file"
     echo "local=\"$local_path\"" >> "$profile_file"
     echo "remote=\"$remote_path\"" >> "$profile_file"
-
+    
     echo -e "${GREEN}${CLONE_MARKER}Added '$path_name' to profile '$profile'${NC}"
     echo "  local: $local_path"
     echo "  remote: $remote_path"
@@ -743,14 +593,14 @@ profile_add() {
 profile_remove() {
     local profile="$1"
     local path_name="$2"
-
+    
     local profile_file="$PROFILES_DIR/$profile.conf"
-
+    
     if [[ ! -f "$profile_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
         return 1
     fi
-
+    
     if [[ -z "$path_name" ]]; then
         if confirm "Delete entire profile '$profile'?"; then
             rm "$profile_file"
@@ -763,24 +613,24 @@ profile_remove() {
         fi
         return
     fi
-
+    
     local tmp_file
     tmp_file=$(mktemp)
-
+    
     local in_section=false
     while IFS= read -r line; do
         if [[ "$line" == "[$path_name]" ]]; then
             in_section=true
             continue
         fi
-        if [[ "$in_section" == true && "$line" =~ ^\[.+\]$ ]]; then
+        if [[ "$in_section" == true && "$line" == \[\]*"]" ]]; then
             in_section=false
         fi
         if [[ "$in_section" == false ]]; then
             echo "$line"
         fi
     done < "$profile_file" > "$tmp_file"
-
+    
     mv "$tmp_file" "$profile_file"
     echo -e "${GREEN}${CLONE_MARKER}Removed '$path_name' from profile '$profile'${NC}"
 }
@@ -788,53 +638,41 @@ profile_remove() {
 profile_list() {
     echo "Profiles:"
     if [[ -z "$(ls -A "$PROFILES_DIR" 2>/dev/null)" ]]; then
-        echo "  No profiles yet. Create one with: lsync create <n>"
+        echo "  No profiles yet. Create one with: lsync create <name>"
         return
     fi
-
+    
     for profile_file in "$PROFILES_DIR"/*.conf; do
         [[ -f "$profile_file" ]] || continue
         local name
         name=$(basename "$profile_file" .conf)
-
+        
         if [[ "$name" == "$DEFAULT_PROFILE" ]]; then
             echo -e "  ${GREEN}$name${NC} (default)"
         else
             echo "  $name"
         fi
-
-        # BUG 9 FIX: Removed "source $profile_file" that appeared here.
-        # It was dangerous (executes arbitrary code in each profile file) and
-        # completely pointless — the variables it set were never used, because the
-        # path names are read by the while loop below anyway.
-
+        
+        source "$profile_file" 2>/dev/null || continue
+        
         local paths=()
         while IFS= read -r line; do
-            if [[ "$line" == \[*\] ]]; then
-                # BUG 10 FIX: Replace ${line#[} with ${line:1}.
-                # The old form uses [ as a glob character-class opener; an unclosed
-                # character class has undefined behaviour in bash and is non-portable.
-                local p="${line:1}"   # strip leading [
-                p="${p%]}"           # strip trailing ]
+            if [[ "$line" == \[*] ]]; then
+                local p="${line#[}"
+                p="${p%]}"
                 paths+=("$p")
             fi
         done < "$profile_file"
-
+        
         for p in "${paths[@]}"; do
             echo "    - $p"
         done
     done
 }
 
-# BUG 8 FIX: Helper that escapes characters that are special in a sed replacement
-# string ( & / \ ) so profile names containing them don't corrupt the sed expression.
-_sed_escape_replacement() {
-    printf '%s' "$1" | sed 's/[&/\\]/\\&/g'
-}
-
 profile_set_default() {
     local profile="$1"
-
+    
     if [[ -z "$profile" ]]; then
         if [[ -n "$DEFAULT_PROFILE" ]]; then
             echo "Current default: $DEFAULT_PROFILE"
@@ -844,25 +682,20 @@ profile_set_default() {
         echo "Usage: lsync default <profile>"
         return
     fi
-
+    
     local profile_file="$PROFILES_DIR/$profile.conf"
-
+    
     if [[ ! -f "$profile_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
         return 1
     fi
-
-    # BUG 8 FIX: Escape the profile name before inserting it into the sed replacement.
-    # A name containing / & or \ would otherwise break the sed expression or silently
-    # produce the wrong substitution.
-    local safe_profile
-    safe_profile=$(_sed_escape_replacement "$profile")
+    
     if grep -q "^DEFAULT_PROFILE=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$safe_profile\"/" "$CONFIG_FILE"
+        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$profile\"/" "$CONFIG_FILE"
     else
         echo "DEFAULT_PROFILE=\"$profile\"" >> "$CONFIG_FILE"
     fi
-
+    
     DEFAULT_PROFILE="$profile"
     echo -e "${GREEN}${CLONE_MARKER}Default profile set to '$profile'${NC}"
 }
@@ -870,97 +703,64 @@ profile_set_default() {
 profile_rename() {
     local old_name="$1"
     local new_name="$2"
-
+    
     if [[ -z "$old_name" || -z "$new_name" ]]; then
         echo "Usage: lsync rename <old-name> <new-name>"
         return 1
     fi
-
+    
     local old_file="$PROFILES_DIR/$old_name.conf"
     local new_file="$PROFILES_DIR/$new_name.conf"
-
+    
     if [[ ! -f "$old_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$old_name' does not exist${NC}"
         return 1
     fi
-
+    
     if [[ -f "$new_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$new_name' already exists${NC}"
         return 1
     fi
-
+    
     mv "$old_file" "$new_file"
-
-    # BUG 8 FIX: Escape new_name in the sed replacement string.
+    
     if [[ "$DEFAULT_PROFILE" == "$old_name" ]]; then
-        local safe_new_name
-        safe_new_name=$(_sed_escape_replacement "$new_name")
-        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$safe_new_name\"/" "$CONFIG_FILE"
+        sed -i "s/^DEFAULT_PROFILE=.*/DEFAULT_PROFILE=\"$new_name\"/" "$CONFIG_FILE"
     fi
-
+    
     echo -e "${GREEN}${CLONE_MARKER}Renamed profile '$old_name' to '$new_name'${NC}"
 }
 
 load_profile() {
     local profile="$1"
     local profile_file="$PROFILES_DIR/$profile.conf"
-
+    
     if [[ ! -f "$profile_file" ]]; then
         echo -e "${RED}${CLONE_MARKER}Profile '$profile' does not exist${NC}"
         return 1
     fi
-
+    
     source "$profile_file"
-
+    
     return 0
 }
 
 get_profile_paths() {
     local profile="$1"
     local profile_file="$PROFILES_DIR/$profile.conf"
-
+    
     if [[ ! -f "$profile_file" ]]; then
         return 1
     fi
-
-    awk '/^\[/ { gsub(/[\[\]]/, ""); print }' "$profile_file" 2>/dev/null
-}
-
-# BUG 19 FIX: Replaced the fragile grep -A2 approach used throughout profile_sync.
-# grep -A2 only works when keys appear immediately after the header with no blank
-# lines and in exactly the right order. This function reads the file properly,
-# entering the target section and stopping at the next header.
-get_profile_path_value() {
-    local profile_file="$1"
-    local section="$2"
-    local key="$3"
-
-    local in_section=false
-    while IFS= read -r line; do
-        if [[ "$line" == "[$section]" ]]; then
-            in_section=true
-            continue
-        fi
-        # Stop at the next section header
-        if [[ "$in_section" == true && "$line" =~ ^\[.+\]$ ]]; then
-            break
-        fi
-        if [[ "$in_section" == true && "$line" == "${key}="* ]]; then
-            local val="${line#"${key}="}"
-            val="${val#\"}"   # strip optional leading quote
-            val="${val%\"}"   # strip optional trailing quote
-            echo "$val"
-            return 0
-        fi
-    done < "$profile_file"
-    return 1
+    
+    grep -oP '^\[\K[^\]]+' "$profile_file" 2>/dev/null
 }
 
 profile_sync() {
     local action="$1"
     local profile="$2"
     local path_name="$3"
-
+    
     if [[ -z "$profile" ]]; then
         if [[ -n "$DEFAULT_PROFILE" ]]; then
             profile="$DEFAULT_PROFILE"
@@ -971,113 +771,119 @@ profile_sync() {
             return 1
         fi
     fi
-
+    
     load_profile "$profile" || return 1
-
+    
     prompt_sudo_if_needed || { echo "Profile sync cancelled."; return 1; }
-
+    
     if [[ -n "$path_name" ]]; then
         local local_val remote_val
-        # BUG 19 FIX: Use proper section parser instead of fragile grep -A2
-        local_val=$(get_profile_path_value "$PROFILES_DIR/$profile.conf" "$path_name" "local")
-        remote_val=$(get_profile_path_value "$PROFILES_DIR/$profile.conf" "$path_name" "remote")
-
+        local_val=$(grep -A2 "^\[$path_name\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^local=" | cut -d'"' -f2)
+        remote_val=$(grep -A2 "^\[$path_name\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^remote=" | cut -d'"' -f2)
+        
         if [[ -z "$local_val" || -z "$remote_val" ]]; then
             echo -e "${RED}${CLONE_MARKER}Path '$path_name' not found in profile '$profile'${NC}"
             return 1
         fi
-
+        
         local local_dir="$local_val"
         local remote_dir="$remote_val"
-
+        
         if [[ "$QUIET" != "true" ]]; then
             echo -e "${CYAN}${CLONE_MARKER}[$profile/$path_name] Checking...${NC}"
         fi
-
+        
         if [[ "$action" == "push" ]]; then
-            if ! get_changes "$local_dir/" "$SSH_USER@$HOST:$remote_dir/" "$QUIET"; then
+            if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
                 if [[ "$QUIET" != "true" ]]; then
                     echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
                 fi
                 return
             fi
-
+            
+            get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+            
             if confirm "Push $path_name to server?"; then
-                backup_create "$SSH_USER@$HOST:$remote_dir/" "${profile}_${path_name}"
-                run_rsync_progress "$local_dir/" "$SSH_USER@$HOST:$remote_dir/"
+                backup_create "$USER@$HOST:$remote_dir/" "$profile_$path_name"
+                run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
             else
                 echo "Push cancelled."
             fi
         else
-            if ! get_changes "$SSH_USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"; then
+            if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
                 if [[ "$QUIET" != "true" ]]; then
                     echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
                 fi
                 return
             fi
-
+            
+            get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+            
             if confirm "Pull $path_name from server?"; then
-                backup_create "$local_dir/" "${profile}_${path_name}"
-                run_rsync_progress "$SSH_USER@$HOST:$remote_dir/" "$local_dir/"
+                backup_create "$local_dir/" "$profile_$path_name"
+                run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
             else
                 echo "Pull cancelled."
             fi
         fi
         return
     fi
-
+    
     local paths
     mapfile -t paths < <(get_profile_paths "$profile")
-
+    
     if [[ ${#paths[@]} -eq 0 ]]; then
         echo -e "${YELLOW}${CLONE_MARKER}No paths in profile '$profile'${NC}"
         echo "Add paths with: lsync add $profile <path-name> [folder]"
         return
     fi
-
+    
     for p in "${paths[@]}"; do
         local local_val remote_val
-        # BUG 19 FIX: Proper section parser throughout
-        local_val=$(get_profile_path_value "$PROFILES_DIR/$profile.conf" "$p" "local")
-        remote_val=$(get_profile_path_value "$PROFILES_DIR/$profile.conf" "$p" "remote")
-
+        local_val=$(grep -A2 "^\[$p\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^local=" | cut -d'"' -f2)
+        remote_val=$(grep -A2 "^\[$p\]" "$PROFILES_DIR/$profile.conf" 2>/dev/null | grep "^remote=" | cut -d'"' -f2)
+        
         if [[ -z "$local_val" || -z "$remote_val" ]]; then
             continue
         fi
-
+        
         local local_dir="$local_val"
         local remote_dir="$remote_val"
-
+        
         if [[ "$QUIET" != "true" ]]; then
             echo ""
             echo -e "${CYAN}${CLONE_MARKER}[$profile/$p] Checking...${NC}"
         fi
-
+        
         if [[ "$action" == "push" ]]; then
-            if ! get_changes "$local_dir/" "$SSH_USER@$HOST:$remote_dir/" "$QUIET"; then
+            if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
                 if [[ "$QUIET" != "true" ]]; then
                     echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
                 fi
                 continue
             fi
-
+            
+            get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+            
             if confirm "Push $p to server?"; then
-                backup_create "$SSH_USER@$HOST:$remote_dir/" "${profile}_${p}"
-                run_rsync_progress "$local_dir/" "$SSH_USER@$HOST:$remote_dir/"
+                backup_create "$USER@$HOST:$remote_dir/" "$profile_$p"
+                run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
             else
                 echo "Push cancelled."
             fi
         else
-            if ! get_changes "$SSH_USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"; then
+            if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
                 if [[ "$QUIET" != "true" ]]; then
                     echo -e "${GREEN}${CLONE_MARKER}Nothing to commit${NC}"
                 fi
                 continue
             fi
-
+            
+            get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+            
             if confirm "Pull $p from server?"; then
-                backup_create "$local_dir/" "${profile}_${p}"
-                run_rsync_progress "$SSH_USER@$HOST:$remote_dir/" "$local_dir/"
+                backup_create "$local_dir/" "$profile_$p"
+                run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
             else
                 echo "Pull cancelled."
             fi
@@ -1085,160 +891,144 @@ profile_sync() {
     done
 }
 
-# BUG 7 FIX: Replaced the double-rsync pattern (dry-run to count files, then real
-# sync) with a single rsync invocation using --info=progress2. The old approach
-# doubled network round-trips and had a race condition (files could change between
-# the two runs, making the progress count wrong).
-# BUG 11 FIX: RSYNC_OPTS is now an array — expanded with "${RSYNC_OPTS[@]}".
-# BUG 12 FIX: SSH key path single-quoted inside -e strings.
-# BUG 20 FIX: rsync error output is no longer silently discarded by a grep filter.
-#   Under the old approach, rsync output was piped through grep -v '^sending' …
-#   before being stored, stripping any error line that happened to start with one
-#   of those prefixes. Now output is captured raw; if the sync fails the last few
-#   lines are printed verbatim so the real error is visible.
 run_rsync_progress() {
     local src="$1"
     local dst="$2"
-
+    
     local rsync_path
     rsync_path=$(get_rsync_path)
     local remote_user
     remote_user=$(get_remote_user)
     local dst_with_user
-
-    build_rsync_filters
-
+    local filters
+    filters=$(build_rsync_filters)
+    
     if [[ "$dst" == *@*:* ]]; then
         dst_with_user="${remote_user}@${dst#*@}"
     else
         dst_with_user="$dst"
     fi
-
-    if [[ "$DEBUG" == true ]]; then
-        rsync "${RSYNC_OPTS[@]}" "${FILTER_ARGS[@]}" \
-            --rsync-path="$rsync_path" \
-            -e "ssh -i '$SSH_KEY' $(get_ssh_opts)" \
-            "$src" "$dst_with_user"
+    
+    local total_files
+    total_files=$(rsync -av --stats -n $filters --rsync-path="$rsync_path" -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src" "$dst_with_user" 2>&1 | grep -E "Number of regular files transferred" | awk '{print $NF}' | tr -d ',')
+    [[ -z "$total_files" ]] && total_files=0
+    
+    if [[ $total_files -eq 0 ]]; then
+        if [[ "$QUIET" != "true" ]]; then
+            echo -e "${CYAN}${CLONE_MARKER}Syncing...${NC}"
+        fi
+        if ! rsync -avz -q $filters --rsync-path="$rsync_path" -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src" "$dst_with_user" 2>&1; then
+            echo -e "${RED}${CLONE_MARKER}Error: Sync failed${NC}" >&2
+            return 1
+        fi
+        if [[ "$QUIET" != "true" ]]; then
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
+        fi
         return
     fi
-
+    
+    if [[ "$DEBUG" == true ]]; then
+        rsync -avz $filters --rsync-path="$rsync_path" -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src" "$dst_with_user"
+        return
+    fi
+    
+    local current=0
+    local bar_width=30
+    local rsync_exit_code=0
+    local start_time=$(date +%s)
+    local last_time=$start_time
+    local bytes_transferred=0
+    
+    get_progress_color() {
+        local pct=$1
+        if [[ $pct -lt 33 ]]; then
+            echo "${GREEN}"
+        elif [[ $pct -lt 66 ]]; then
+            echo "${YELLOW}"
+        else
+            echo "${RED}"
+        fi
+    }
+    
+    format_speed() {
+        local speed=$1
+        if [[ $speed -lt 1024 ]]; then
+            echo "${speed}B/s"
+        elif [[ $speed -lt 1048576 ]]; then
+            echo "$((speed / 1024))KB/s"
+        else
+            echo "$((speed / 1048576))MB/s"
+        fi
+    }
+    
     format_time() {
         local secs=$1
         local mins=$((secs / 60))
         local rem_secs=$((secs % 60))
         printf "%02d:%02d" $mins $rem_secs
     }
-
-    local bar_width=30
-    local rsync_exit_code=0
-    local start_time
-    start_time=$(date +%s)
-    local err_file; err_file=$(mktemp /tmp/.lsync_rsync_err_XXXXXX)
-
-    # BUG 7 FIX: Single rsync call. --info=progress2 makes rsync emit per-file
-    # progress lines containing "to-check=REMAINING/TOTAL" which we parse live.
-    # PIPESTATUS[0] captures rsync's real exit code from the pipeline even when
-    # the consumer (while loop) exits 0.
-    # BUG 20 FIX: No grep filtering in the pipeline — all output reaches the loop.
-    rsync "${RSYNC_OPTS[@]}" "${FILTER_ARGS[@]}" \
-        --rsync-path="$rsync_path" \
-        --info=progress2 \
-        -e "ssh -i '$SSH_KEY' $(get_ssh_opts)" \
-        "$src" "$dst_with_user" 2>&1 | \
-    {
-        local total_files=0
-        local current=0
-        local showed_bar=false
-        local last_error_lines=()
-
-        while IFS= read -r line; do
-            # --info=progress2 format (per-file progress):
-            #   "  <bytes>  <pct>%  <speed>  <eta> (xfer#N, to-check=REMAINING/TOTAL)"
-            if [[ "$line" =~ to-check=([0-9]+)/([0-9]+) ]]; then
-                local remaining="${BASH_REMATCH[1]}"
-                local new_total="${BASH_REMATCH[2]}"
-                # Total can grow as rsync discovers more files
-                [[ $new_total -gt $total_files ]] && total_files=$new_total
-                current=$((total_files - remaining))
-                showed_bar=true
-
-                local current_time
-                current_time=$(date +%s)
-                local elapsed=$((current_time - start_time))
-
-                local pct=0
-                [[ $total_files -gt 0 ]] && pct=$((current * 100 / total_files))
-                local filled=$((pct * bar_width / 100))
-                local empty=$((bar_width - filled))
-
-                local eta=0
-                if [[ $current -gt 0 && $elapsed -gt 0 ]]; then
+    
+    while IFS= read -r line; do
+        first_char="${line:0:1}"
+        if [[ "$first_char" == ">" || "$first_char" == "<" || "$first_char" == "c" ]]; then
+            ((current++))
+            local current_time=$(date +%s)
+            local elapsed=$((current_time - start_time))
+            
+            filename=$(echo "$line" | awk '{for(i=5;i<=NF;i++) printf "%s ", $i}' | sed 's/ *$//')
+            [[ -z "$filename" ]] && filename="transferring..."
+            
+            local pct=$((current * 100 / total_files))
+            local filled=$((pct * bar_width / 100))
+            local empty=$((bar_width - filled))
+            
+            local speed=0
+            if [[ $elapsed -gt 0 ]]; then
+                speed=$((current * 50000 / elapsed))
+            fi
+            
+            local eta=0
+            if [[ $current -gt 0 && $elapsed -gt 0 ]]; then
+                local rate=$((current * 100 / elapsed))
+                if [[ $rate -gt 0 ]]; then
                     eta=$(((total_files - current) * elapsed / current))
                 fi
-
-                local color
-                if   [[ $pct -lt 33 ]]; then color="${GREEN}"
-                elif [[ $pct -lt 66 ]]; then color="${YELLOW}"
-                else                          color="${RED}"
-                fi
-
-                # Build bar strings without relying on seq producing output for N=0
-                local hash_str dot_str
-                hash_str=$(printf '%*s' "$filled" '' 2>/dev/null | tr ' ' '#' || true)
-                dot_str=$(printf  '%*s' "$empty"  '' 2>/dev/null | tr ' ' '.' || true)
-
-                printf "\r${color}%s${RED}%s${NC} %3d%% (%d/%d) | ETA: %s" \
-                    "$hash_str" "$dot_str" \
-                    "$pct" "$current" "$total_files" "$(format_time $eta)"
-            else
-                # BUG 20 FIX: Retain non-progress lines so errors are shown on failure
-                last_error_lines+=("$line")
-                # Keep only the last 10 lines to bound memory usage
-                if [[ ${#last_error_lines[@]} -gt 10 ]]; then
-                    last_error_lines=("${last_error_lines[@]:1}")
-                fi
             fi
-        done
-
-        [[ "$showed_bar" == true ]] && echo ""
-
-        # Export last_error_lines via a temp file so the outer scope can read them
-        # (subshell variables are not visible to the parent after the pipeline ends)
-        # err_file inherited from outer scope
-        printf '%s\n' "${last_error_lines[@]}" > "$err_file" 2>/dev/null || true
-    }
-    rsync_exit_code=${PIPESTATUS[0]}
-
-    if [[ $rsync_exit_code -ne 0 ]]; then
-        # BUG 20 FIX: Print the raw error output captured above, then the summary.
-                # err_file already set before pipe
-        if [[ -s "$err_file" ]]; then
-            echo -e "${RED}${CLONE_MARKER}rsync output:${NC}" >&2
-            cat "$err_file" >&2
+            
+            local color
+            color=$(get_progress_color $pct)
+            
+            printf "\r${color}%-${filled}s${RED}%-${empty}s${NC} %3d%% | %s | ETA: %s | %s" \
+                "$(printf '#%.0s' $(seq 1 $filled) 2>/dev/null || echo "")" \
+                "$(printf '.%.0s' $(seq 1 $empty) 2>/dev/null || echo "")" \
+                "$pct" "$(format_speed $speed)" "$(format_time $eta)" "$filename"
         fi
-        rm -f "$err_file"
+    done < <(rsync -avz $filters --rsync-path="$rsync_path" -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" "$src" "$dst_with_user" 2>&1 | grep -v '^sending' | grep -v '^receiving' | grep -v '^total:')
+    
+    rsync_exit_code=${PIPESTATUS[0]}
+    echo ""
+    
+    if [[ $rsync_exit_code -ne 0 ]]; then
         echo -e "${RED}${CLONE_MARKER}Error: Sync failed with exit code $rsync_exit_code${NC}" >&2
         return 1
     fi
-    rm -f "$err_file"
-
+    
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
     fi
-
+    
     backup_rotate
 }
 
 sync_push() {
     local folder="$1"
-    local cwd
-    cwd="$(pwd)"
+    local cwd="$(pwd)"
     local local_dir
     local remote_dir
     local backup_name
-
+    
     prompt_sudo_if_needed || { echo "Push cancelled."; return 1; }
-
+    
     if [[ -z "$folder" ]]; then
         local_dir="$cwd"
         remote_dir="$cwd"
@@ -1248,27 +1038,30 @@ sync_push() {
         remote_dir="$cwd/$folder"
         backup_name="$(basename "$folder")"
     fi
-
+    
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
-
-    if ! get_changes "$local_dir/" "$SSH_USER@$HOST:$remote_dir/" "$QUIET"; then
+    
+    if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
         if [[ "$QUIET" != "true" ]]; then
             echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
         fi
         return
     fi
-
+    
+    get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+    
     if confirm "Are you sure you want to commit those changes?"; then
         if [[ "$QUIET" != "true" ]]; then
             echo "Creating backup of server destination..."
         fi
-        backup_create "$SSH_USER@$HOST:$remote_dir/" "$backup_name"
-
-        run_rsync_progress "$local_dir/" "$SSH_USER@$HOST:$remote_dir/"
-        # BUG 5 FIX: run_rsync_progress already prints "Done!" — the duplicate
-        # echo that was here has been removed.
+        backup_create "$USER@$HOST:$remote_dir/" "$backup_name"
+        
+        run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
+        if [[ "$QUIET" != "true" ]]; then
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
+        fi
     else
         echo "Push cancelled."
     fi
@@ -1276,14 +1069,13 @@ sync_push() {
 
 sync_pull() {
     local folder="$1"
-    local cwd
-    cwd="$(pwd)"
+    local cwd="$(pwd)"
     local local_dir
     local remote_dir
     local backup_name
-
+    
     prompt_sudo_if_needed || { echo "Pull cancelled."; return 1; }
-
+    
     if [[ -z "$folder" ]]; then
         local_dir="$cwd"
         remote_dir="$cwd"
@@ -1293,26 +1085,30 @@ sync_pull() {
         remote_dir="$cwd/$folder"
         backup_name="$(basename "$folder")"
     fi
-
+    
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
-
-    if ! get_changes "$SSH_USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"; then
+    
+    if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
         if [[ "$QUIET" != "true" ]]; then
             echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
         fi
         return
     fi
-
+    
+    get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+    
     if confirm "Are you sure you want to commit those changes?"; then
         if [[ "$QUIET" != "true" ]]; then
             echo "Creating backup of local destination..."
         fi
         backup_create "$local_dir/" "$backup_name"
-
-        run_rsync_progress "$SSH_USER@$HOST:$remote_dir/" "$local_dir/"
-        # BUG 5 FIX: Removed duplicate "Done!" echo.
+        
+        run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
+        if [[ "$QUIET" != "true" ]]; then
+            echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
+        fi
     else
         echo "Pull cancelled."
     fi
@@ -1322,48 +1118,56 @@ sync_default() {
     local action="$1"
     local local_dir="$LOCAL_PATH/$REMOTE_PATH"
     local remote_dir="$REMOTE_PATH"
-
+    
     prompt_sudo_if_needed || { echo "Sync cancelled."; return 1; }
-
+    
     if [[ "$QUIET" != "true" ]]; then
         echo -e "${CYAN}${CLONE_MARKER} Checking...${NC}"
     fi
-
+    
     if [[ "$action" == "push" ]]; then
-        if ! get_changes "$local_dir/" "$SSH_USER@$HOST:$remote_dir/" "$QUIET"; then
+        if ! get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "true"; then
             if [[ "$QUIET" != "true" ]]; then
                 echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
             fi
             return
         fi
-
+        
+        get_changes "$local_dir/" "$USER@$HOST:$remote_dir/" "$QUIET"
+        
         if confirm "Are you sure you want to commit those changes?"; then
             if [[ "$QUIET" != "true" ]]; then
                 echo "Creating backup of server destination..."
             fi
-            backup_create "$SSH_USER@$HOST:$remote_dir/" "lodestone"
-
-            run_rsync_progress "$local_dir/" "$SSH_USER@$HOST:$remote_dir/"
-            # BUG 5 FIX: Removed duplicate "Done!" echo.
+            backup_create "$USER@$HOST:$remote_dir/" "lodestone"
+            
+            run_rsync_progress "$local_dir/" "$USER@$HOST:$remote_dir/"
+            if [[ "$QUIET" != "true" ]]; then
+                echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
+            fi
         else
             echo "Push cancelled."
         fi
     else
-        if ! get_changes "$SSH_USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"; then
+        if ! get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "true"; then
             if [[ "$QUIET" != "true" ]]; then
                 echo -e "${GREEN}${CLONE_MARKER} Nothing to commit${NC}"
             fi
             return
         fi
-
+        
+        get_changes "$USER@$HOST:$remote_dir/" "$local_dir/" "$QUIET"
+        
         if confirm "Are you sure you want to commit those changes?"; then
             if [[ "$QUIET" != "true" ]]; then
                 echo "Creating backup of local destination..."
             fi
             backup_create "$local_dir/" "lodestone"
-
-            run_rsync_progress "$SSH_USER@$HOST:$remote_dir/" "$local_dir/"
-            # BUG 5 FIX: Removed duplicate "Done!" echo.
+            
+            run_rsync_progress "$USER@$HOST:$remote_dir/" "$local_dir/"
+            if [[ "$QUIET" != "true" ]]; then
+                echo -e "${GREEN}${CLONE_MARKER} Done!${NC}"
+            fi
         else
             echo "Pull cancelled."
         fi
@@ -1372,24 +1176,22 @@ sync_default() {
 
 main() {
     parse_flags "$@"
-
-    build_rsync_opts
-
-    if ! is_color_enabled; then
+    
+    if [[ "$COLOR_OUTPUT" == false ]]; then
         RED=''
         GREEN=''
         CYAN=''
         YELLOW=''
         NC=''
     fi
-
+    
     if [[ "$CMD_ACTION" == "init" ]]; then
         if [[ "$CMD_ARG" == "--reset" || -f "$CONFIG_FILE" ]]; then
             if [[ -f "$CONFIG_FILE" && "$CMD_ARG" != "--reset" ]]; then
                 echo -e "${YELLOW}${CLONE_MARKER}Config already exists at $CONFIG_FILE${NC}"
                 echo -n "Overwrite? [y/N]: "
-                read -r confirm_overwrite || { echo; exit 0; }
-                if [[ "$confirm_overwrite" != "y" && "$confirm_overwrite" != "Y" ]]; then
+                read -r confirm
+                if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
                     echo "Cancelled."
                     exit 0
                 fi
@@ -1398,40 +1200,25 @@ main() {
         init_config
         exit 0
     fi
-
+    
     load_config
-
-    if ! validate_config; then
+    
+    if ! validate_config 2>/dev/null; then
         echo "Run 'lsync init' to configure."
         exit 1
     fi
-
+    
     if [[ -z "$CMD_ACTION" ]]; then
         show_help
         exit 0
     fi
-
+    
     case "$CMD_ACTION" in
         push)
-            # BUG 4 FIX: The old wildcard (*) case had unreachable elif branches that
-            # checked for push/pull with a profile argument — they were unreachable
-            # because push and pull were already matched by explicit case entries above.
-            # The fix moves the profile-detection logic into the explicit push/pull
-            # entries: if the argument names an existing profile, route to profile_sync;
-            # otherwise, fall through to the regular directory sync.
-            if [[ -n "${CMD_ARG:-}" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
-                profile_sync "push" "$CMD_ARG" "${CMD_ARG2:-}"
-            else
-                sync_push "${CMD_ARG:-}"
-            fi
+            sync_push "${CMD_ARG:-}"
             ;;
         pull)
-            # BUG 4 FIX: Same profile-first routing as push.
-            if [[ -n "${CMD_ARG:-}" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
-                profile_sync "pull" "$CMD_ARG" "${CMD_ARG2:-}"
-            else
-                sync_pull "${CMD_ARG:-}"
-            fi
+            sync_pull "${CMD_ARG:-}"
             ;;
         "$PUSH_CMD")
             sync_default "push"
@@ -1449,23 +1236,27 @@ main() {
             profile_create "${CMD_ARG:-}"
             ;;
         add)
-            profile_add "${CMD_ARG:-}" "${CMD_ARG2:-}" "${CMD_ARG3:-}"
+            profile_add "${2:-}" "${3:-}" "${4:-}"
             ;;
         remove|rm)
-            profile_remove "${CMD_ARG:-}" "${CMD_ARG2:-}"
+            profile_remove "${2:-}" "${3:-}"
             ;;
         profiles|ls)
             profile_list
             ;;
         default)
-            profile_set_default "${CMD_ARG:-}"
+            profile_set_default "${2:-}"
             ;;
         rename)
-            profile_rename "${CMD_ARG:-}" "${CMD_ARG2:-}"
+            profile_rename "${2:-}" "${3:-}"
             ;;
         *)
             if [[ -f "$PROFILES_DIR/${CMD_ACTION}.conf" ]]; then
                 profile_sync "pull" "$CMD_ACTION" "${CMD_ARG:-}"
+            elif [[ "$CMD_ACTION" == "push" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
+                profile_sync "push" "$CMD_ARG" "${3:-}"
+            elif [[ "$CMD_ACTION" == "pull" && -f "$PROFILES_DIR/${CMD_ARG}.conf" ]]; then
+                profile_sync "pull" "$CMD_ARG" "${3:-}"
             else
                 echo -e "${RED}${CLONE_MARKER}Unknown command: $CMD_ACTION${NC}"
                 echo ""

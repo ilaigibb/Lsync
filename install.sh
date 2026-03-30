@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.1"
 INSTALL_DIR="/usr/local/bin"
 
 RED='\033[0;31m'
@@ -37,7 +37,7 @@ rm -f "${SCRIPT_TEMP}"
 echo -e "${GREEN}Installed lsync to $INSTALL_DIR/lsync${NC}"
 echo ""
 
-CONFIG_FILE="$HOME/.lsyncrc"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/lsync/config"
 if [ -f "$CONFIG_FILE" ]; then
     echo -e "${YELLOW}Config already exists at $CONFIG_FILE${NC}"
     echo -n "Reconfigure? [y/N]: "
